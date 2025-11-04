@@ -37,7 +37,7 @@ If none of those approvers are still appropriate, then changes to that list
 should be approved by the remaining approvers and/or the owning SIG (or
 SIG Architecture for cross-cutting KEPs).
 -->
-# KEP-5053: Fallback for HPA on failure to retrieve metrics
+# KEP-5053: Fallback for HPA External Metrics on Retrieval Failure
 
 <!--
 This is the title of your KEP. Keep it short, simple, and descriptive. A good
@@ -123,25 +123,22 @@ Items marked with (R) are required *prior to targeting to a milestone / release*
 **Note:** This checklist is iterative and should be reviewed and updated every time this enhancement is being considered for a milestone.
 -->
 
-[kubernetes.io]: https://kubernetes.io/
-[kubernetes/enhancements]: https://git.k8s.io/enhancements
-[kubernetes/kubernetes]: https://git.k8s.io/kubernetes
-[kubernetes/website]: https://git.k8s.io/website
-
 ## Summary
 
-The [Horizontal Pod Autoscaler (HPA)][] relies on the controller manager to 
-fetch metrics from either the resource metrics API (for per-pod resource metrics) 
-or the custom metrics API (for other types of metrics). When these APIs experience 
-downtime, the HPA becomes unable to make scaling decisions, potentially leaving 
-workloads unmanaged.
+The Horizontal Pod Autoscaler's reliance on external metrics creates a dependency on systems outside the Kubernetes cluster's control. These external systems (cloud provider APIs, third-party monitoring systems, message brokers, etc.) may experience:
 
-This proposal introduces a new configuration parameter for the HPA, enabling 
-users to define behavior in the event of metric retrieval failures. For example, 
-users can opt to scale the target resource to the maximum number of replicas 
-specified in the HPA, ensuring safer operation during metrics unavailability.
+- Network connectivity issues
+- Rate limiting
+- Service outages
+- Authentication/authorization failures
+- Degraded performance
 
-[Horizontal Pod Autoscaler (HPA)]: https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
+When external metrics become unavailable, the HPA cannot make informed scaling decisions, which can lead to:
+- Workloads stuck at insufficient scale during traffic spikes
+- Inability to respond to critical business metrics (e.g., queue depth, error rates)
+- Over-dependence on external system reliability
+
+Unlike in-cluster resource metrics (CPU, memory) served by metrics-server, which are part of the cluster's core infrastructure, external metrics are inherently less reliable and outside the cluster operator's direct control.
 
 ## Motivation
 
@@ -152,7 +149,7 @@ or custom metrics API to make scaling decisions. If these APIs experience
 downtime or degradation, the HPA cannot take any scaling actions, leaving 
 workloads potentially overprovisioned, underprovisioned, or entirely unmanaged.
 
-In contrast, other autoscalers like [KEDA][] already provide mechanisms to define 
+In contrast, other autoscalers like [KEDA](https://keda.sh/) already provide mechanisms to define 
 fallback strategies in the event of metric retrieval failures. These strategies 
 mitigate the impact of API unavailability, enabling the autoscaler to maintain 
 a functional scaling strategy even when metrics are temporarily inaccessible.
@@ -165,187 +162,180 @@ actions, both as scaling to a predefined maximum or holding the current scale
 with user-defined requirements during unexpected disruptions.
 
 Additionally, the community has also expressed interest in addressing this
-limitation in the past. ([#109214][])
-
-[KEDA]: https://keda.sh/docs/2.15/reference/scaledobject-spec/#fallback
-[#109214]: https://github.com/kubernetes/kubernetes/issues/109214
+limitation in the past. ([#109214](https://github.com/kubernetes/kubernetes/issues/109214))
 
 ### Goals
 
-- Allow users to optionally define the number of replicas to scale in the case of metric retrieval failure.
+- Allow users to optionally define fallback values for external metrics when retrieval fails
+- Provide per-metric failure tracking and fallback behavior
+- Maintain the HPA's scaling algorithm and respect min/max replica constraints
+- Ensure users can determine which specific metrics are using fallback values
 
 ### Non-Goals
 
-- N/A
+- Fallback for resource metrics (CPU, memory from metrics-server) - these are in-cluster and should be addressed at the infrastructure level if unavailable
+- Fallback for pods/object metrics - these use in-cluster APIs
+- Fallback for custom metrics - may be considered in future based on alpha feedback
+- Last-known-good metric value caching
+- Automatic fallback value calculation
+- Changing the HPA scaling algorithm
 
 ## Proposal
 
-Heavily inspired by [KEDA][] propose to add a new field to the existing [`HorizontalPodAutoscalerBehavior`][] object:
+Add optional fallback configuration to the [ExternalMetricSource](https://github.com/kubernetes/kubernetes/blob/48c56e04e0bc2cdc33eb67ee36ca69eba96b5d0b/staging/src/k8s.io/api/autoscaling/v2/types.go#L343) type, allowing users to specify:
 
-- `fallback`: an optional new object containing the following fields:
-  - `failureThreshold`: (integer) the number of failures fetching metrics to trigger the fallback behavior. Must be a value greater than 0. This field is optional and defaults to 3 if not specified.
-  - `replicas`: (integer) the number of replicas to scale to in case of fallback. Must be greater than 0 and it's mandatory.
+1. A failure threshold (number of consecutive failures before activating fallback)
+2. A substitute metric value to use when the threshold is exceeded
 
-To allow for tracking of failures to fetch metrics a new field should be added to the existing [`HorizontalPodAutoscalerStatus`][] object:
-- `consecutiveMetricRetrievalFailureCount`: (integer) tracks the number of consecutive failures in retrieving metrics.
+This approach:
+- **Maintains the HPA algorithm**: Fallback provides a metric value, not a fixed replica count
+- **Is per-metric**: Each external metric can have its own fallback configuration
+- **Provides visibility**: Status shows which metrics are in fallback state
+- **Is conservative**: Only applies to external metrics, which are inherently out-of-cluster
 
-When the `behavior` field on the [`HorizontalPodAutoscalerSpec`][] or the `fallback` field in the [`HorizontalPodAutoscalerBehavior`][] 
-are not specified, the current behavior is preserved, meaning no scaling operations will occur in the event of a metrics retrieval failure.
+### User Stories
 
-[KEDA]: https://keda.sh/docs/2.15/reference/scaledobject-spec/#fallback
-[HorizontalPodAutoscalerBehavior]: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#horizontalpodautoscalerbehavior-v2-autoscaling
-[HorizontalPodAutoscalerStatus]: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#horizontalpodautoscalerstatus-v2-autoscaling
-[HorizontalPodAutoscalerSpec]: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#horizontalpodautoscalerspec-v2-autoscaling
+#### Story 1: SaaS Application Scaling on Queue Depth
+
+I run a SaaS application that scales based on a cloud provider's message queue depth (external metric). Occasionally, the cloud provider's metrics API experiences brief outages (5-10 minutes). During these outages, my HPA cannot scale, and customer requests queue up. 
+
+## Proposal
+
+Add optional fallback configuration to the `ExternalMetricSource` type, allowing users to specify:
+
+1. A failure threshold (number of consecutive failures before activating fallback)
+2. A substitute metric value to use when the threshold is exceeded
+
+This approach:
+- **Maintains the HPA algorithm**: Fallback provides a metric value, not a fixed replica count
+- **Is per-metric**: Each external metric can have its own fallback configuration
+- **Provides visibility**: Status shows which metrics are in fallback state
+- **Is conservative**: Only applies to external metrics, which are inherently out-of-cluster
+
+### User Stories
+
+#### Story 1: SaaS Application Scaling on Queue Depth
+
+I run a SaaS application that scales based on a cloud provider's message queue depth (external metric). Occasionally, the cloud provider's metrics API experiences brief outages (5-10 minutes). During these outages, my HPA cannot scale, and customer requests queue up. 
+
+With this feature, I can configure:
+```yaml
+metrics:
+- type: External
+  external:
+    metric:
+      name: queue_depth
+    target:
+      type: AverageValue
+      averageValue: "30"
+    fallback:
+      failureThreshold: 3
+      averageValue: "100"  # Assume high queue depth, scale up
+```
+
+When the external API fails, the HPA treats the queue depth as 100, triggering scale-up to handle the presumed backlog safely.
+
+#### Story 2: E-commerce Site with Multiple External Metrics
+
+My e-commerce site scales on both external error rates and external request latency from a third-party monitoring system. I want different fallback strategies:
+
+```yaml
+metrics:
+- type: External
+  external:
+    metric:
+      name: error_rate
+    target:
+      type: Value
+      value: "0.01"  # 1% error rate
+    fallback:
+      failureThreshold: 3
+      value: "0.05"  # Assume higher errors, scale up
+- type: External
+  external:
+    metric:
+      name: p99_latency_ms
+    target:
+      type: Value
+      value: "200"
+    fallback:
+      failureThreshold: 3
+      value: "500"  # Assume high latency, scale up
+```
+
+If only one metric fails, the HPA continues using the healthy metric while falling back for the failed one.
 
 ### Risks and Mitigations
 
-There should be minimal risk introduced by the proposed changes:
-- The new field is optional, and its absence results in no changes to the current autoscaling behavior
-- If a change to the new field results in undesirable behavior, the change can be reverted by deploying the previous version of the HPA resource, or removing the `fallback` field entirely.
+- Risk: Users configure inappropriate fallback values
+  - Mitigation: Documentation with best practices; validation ensures values are positive; HPA min/max constraints still apply
+- Risk: Complexity in understanding which metric is in fallback
+  - Mitigation: Per-metric status clearly shows fallback state and failure count
 
 ## Design Details
 
-The `HorizontalPodAutoscaler` API is updated to have a new object `HPAFallback`:
+Add a new `ExternalMetricFallback` type and include it in `ExternalMetricSource`:
 
 ```golang
-type HPAFallback struct {
-    // failureThreshold is the number of failures fetching metrics to trigger the 
-    // fallback behavior.
+// ExternalMetricFallback defines fallback behavior when an external metric cannot be retrieved
+type ExternalMetricFallback struct {
+    // failureThreshold is the number of consecutive failures retrieving this metric
+    // before the fallback value is used. Must be greater than 0.
     // +optional
-    FailureThreshold *int32
+    // +kubebuilder:default=3
+    FailureThreshold *int32 `json:"failureThreshold,omitempty"`
     
-    // failureThreshold is the number of replicas to scale to in case of fallback.
-    Replicas int32
-}
-```
-
-The `HorizontalPodAutoscaler` API is updated to add a new `fallback` field to the `HorizontalPodAutoscalerBehavior` object:
-
-```golang
-type HorizontalPodAutoscalerBehavior struct {
-    // fallback specifies the number of replicas to scale the object to during a 
-    // fallback state and defines the threshold for errors required to enter the 
-    // fallback state.
-    //+optional
-    Fallback *HPAFallback
-
-    // Existing fields.
-    ScaleUp *HPAScalingRules
-    ScaleDown *HPAScalingRules
-}
-```
-
-The `HorizontalPodAutoscaler` API is updated to have a new description of the `behavior` field on the `HorizontalPodAutoscalerSpec` object:
-
-```golang
-type HorizontalPodAutoscalerSpec struct {
-    // behavior configures the scaling behavior of the target, including 
-	// scale-up and scale-down policies, as well as fallback behavior in case
-	// of metric retrieval failures. If not set, the default HPAScalingRules 
-	// are used for scaling decisions, and no scaling operation will occur 
-	// when metrics retrieval fails.
+    // value is the fallback metric value to use when the external metric cannot be retrieved.
+    // Exactly one of value or averageValue must be set, matching the target type.
     // +optional
-    Behavior *HorizontalPodAutoscalerBehavior
+    Value *resource.Quantity `json:"value,omitempty"`
+    
+    // averageValue is the fallback metric value per pod to use when the external metric cannot be retrieved.
+    // Exactly one of value or averageValue must be set, matching the target type.
+    // +optional
+    AverageValue *resource.Quantity `json:"averageValue,omitempty"`
+}
 
-    // Existing fields.
-    ScaleTargetRef CrossVersionObjectReference
-    MinReplicas *int32
-    MaxReplicas int32
-    Metrics []MetricSpec
+// ExternalMetricSource indicates how to scale on a metric not associated with
+// any Kubernetes object (for example length of queue in cloud
+// messaging service, or QPS from loadbalancer running outside of cluster).
+type ExternalMetricSource struct {
+	// metric identifies the target metric by name and selector
+	Metric MetricIdentifier `json:"metric" protobuf:"bytes,1,name=metric"`
+
+	// target specifies the target value for the given metric
+	Target MetricTarget `json:"target" protobuf:"bytes,2,name=target"`
+
+  // fallback defines the behavior when this external metric cannot be retrieved.
+  // If not set, the HPA will not scale based on this metric when it's unavailable.
+  // +optional
+  Fallback *ExternalMetricFallback `json:"fallback,omitempty"`
 }
 ```
 
-The `HorizontalPodAutoscaler` API is updated to add a new `fallback` field to the `HorizontalPodAutoscalerStatus` object:
+Update `MetricStatus` to include per-metric fallback information:
 
 ```golang
-type HorizontalPodAutoscalerStatus struct {
-    // consecutiveMetricRetrievalFailureCount tracks the number of consecutive failures in retrieving metrics. 
-    //+optional
-    ConsecutiveMetricRetrievalFailureCount int32
+// ExternalMetricStatus indicates the current value of a global metric not associated
+// with any Kubernetes object.
+type ExternalMetricStatus struct {
+	// metric identifies the target metric by name and selector
+	Metric MetricIdentifier `json:"metric" protobuf:"bytes,1,name=metric"`
+
+	// current contains the current value for the given metric
+	Current MetricValueStatus `json:"current" protobuf:"bytes,2,name=current"`
     
-    // Existing fields.
-    ObservedGeneration *int64
-    LastScaleTime *metav1.Time
-    CurrentReplicas int32
-    DesiredReplicas int32
-    CurrentMetrics []MetricStatus
-    Conditions []HorizontalPodAutoscalerCondition
+  // fallbackActive indicates whether this metric is currently using a fallback value
+  // due to retrieval failures.
+  // +optional
+  FallbackActive bool `json:"fallbackActive,omitempty"`
+  
+  // consecutiveFailureCount tracks the number of consecutive failures retrieving this metric.
+  // Reset to 0 on successful retrieval.
+  // +optional
+  ConsecutiveFailureCount int32 `json:"consecutiveFailureCount,omitempty"`
 }
 ```
-The `HorizontalPodAutoscaler` API is updated to introduce a new FallbackActive condition to the `HorizontalPodAutoscalerConditionType`:
-
-```golang
-const (
-    // FallbackActive indicates that the HPA has entered the fallback state due to repeated
-    // metric retrieval failures and is applying the configured fallback behavior.
-    FallbackActive HorizontalPodAutoscalerConditionType = "FallbackActive"
-
-    // Existing conditions
-    ScalingActive HorizontalPodAutoscalerConditionType = "ScalingActive"
-    AbleToScale HorizontalPodAutoscalerConditionType = "AbleToScale"
-    ScalingLimited HorizontalPodAutoscalerConditionType = "ScalingLimited"
-)
-```
-
-The new fallback field will be used in the autoscaling controller
-[horizontal.go][]. The current logic is:
-
-```golang
-if err != nil && metricDesiredReplicas == -1 {
-    a.setCurrentReplicasAndMetricsInStatus(hpa, currentReplicas, metricStatuses)
-    if err := a.updateStatusIfNeeded(ctx, hpaStatusOriginal, hpa); err != nil {
-        utilruntime.HandleError(err)
-    }
-    a.eventRecorder.Event(hpa, v1.EventTypeWarning, "FailedComputeMetricsReplicas", err.Error())
-    return fmt.Errorf("failed to compute desired number of replicas based on listed metrics for %s: %v", reference, err)
-}
-```
-
-It will be replaced by:
-
-```golang
-if err != nil && metricDesiredReplicas == -1 {
-    a.increaseConsecutiveMetricRetrievalFailureCount(hpa)
-    a.eventRecorder.Event(hpa, v1.EventTypeWarning, "FailedComputeMetricsReplicas", err.Error())
-    
-    var inFallback bool
-    
-    if hpa.Spec.Fallback != nil {
-        var failureThreshold int32
-        
-        if hpa.Spec.Fallback.FailureThreshold != nil {
-            failureThreshold = *hpa.Spec.Fallback.FailureThreshold
-        } else {
-            // Default value
-            failureThreshold = 3
-        }
-        
-        if failureThreshold < hpa.Status.ConsecutiveMetricRetrievalFailureCount {
-            inFallback = true
-            metricDesiredReplicas = hpa.Spec.Fallback.Replicas
-            a.eventRecorder.Event(hpa, v1.EventTypeWarning, "FallbackThresholdReached", err.Error())
-            setCondition(hpa, autoscalingv2.FallbackActive, v1.ConditionTrue, "FallbackThresholdReached", "%s", err.Error())
-        } else {
-            setCondition(hpa, autoscalingv2.FallbackActive, v1.ConditionFalse, "FallbackThresholdNotReached", "Threshold is set to %d failures. Current failure count is %d", failureThreshold, hpa.Status.ConsecutiveMetricRetrievalFailureCount)
-            inFallback = false
-        }
-    } else {
-        setCondition(hpa, autoscalingv2.FallbackActive, v1.ConditionFalse, "NoFallbackDefined", "No fallback behavior is defined")
-        inFallback = false
-    }
-    
-    if !inFallback {
-        a.setCurrentReplicasAndMetricsInStatus(hpa, currentReplicas, metricStatuses)
-        if err := a.updateStatusIfNeeded(ctx, hpaStatusOriginal, hpa); err != nil {
-            utilruntime.HandleError(err)
-        }
-        return fmt.Errorf("failed to compute desired number of replicas based on listed metrics for %s: %v", reference, err)
-    }
-}
-setCondition(hpa, autoscalingv2.FallbackActive, v1.ConditionFalse, "SucceededToComputeDesiredReplicas", "the HPA controller was able to compute the desired replicas")
-```
-
-[horizontal.go]: https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/podautoscaler/horizontal.go
 
 ### Test Plan
 
@@ -360,7 +350,7 @@ when drafting this test plan.
 [testing-guidelines]: https://git.k8s.io/community/contributors/devel/sig-testing/testing.md
 -->
 
-[ ] I/we understand the owners of the involved components may require updates to
+[x] I/we understand the owners of the involved components may require updates to
 existing tests to make this code solid enough prior to committing the changes necessary
 to implement this enhancement.
 
@@ -425,13 +415,13 @@ https://storage.googleapis.com/k8s-triage/index.html
 We expect no non-infra related flakes in the last month as a GA graduation criteria.
 -->
 
-Will the follow [e2e autoscaling tests]:
+The following [e2e autoscaling tests] will be added:
 
-- Failure of retrieving metrics over the threshold scales the resource with the configured replicas
-- Success in retrieving metrics should reset the `ConsecutiveMetricRetrievalFailureCount` in the `HorizontalPodAutoscalerStatus`
-- When `fallback` is not set the resource should not scale when failing to retrieve metrics
-
-[e2e autoscaling tests]: https://github.com/kubernetes/kubernetes/tree/master/test/e2e/autoscaling
+- External metric failure triggers fallback after threshold is reached
+- Success in retrieving external metric resets the failure count
+- HPA continues using other healthy metrics while one is in fallback
+- Fallback respects HPA min/max replica constraints
+- Status correctly reflects which metrics are in fallback state
 
 ### Graduation Criteria
 
@@ -499,20 +489,43 @@ in back-to-back releases.
 
 #### Alpha
 
-- Feature implemented behind a `HPAFallback` feature flag
+- Feature implemented behind `HPAExternalMetricFallback` feature gate
 - Initial e2e tests completed and enabled
+- Unit tests for validation and controller logic
+- Documentation with examples and best practices
+
+#### Beta
+
+- Gather feedback from alpha users
+- All tests described in the [`e2e tests` section](#e2e-tests) are implemented and linked in this KEP
+- Address any issues found during alpha
+- Documentation includes troubleshooting guide
+- Consider extending to custom metrics based on feedback
 
 ### Upgrade / Downgrade Strategy
 
-When the feature flag is enabled, the `kube-controller-manager` should begin 
-counting concurrent failures starting from 0. If the feature flag is disabled, 
-the status should always reflect `MetricRetrievalFailureCount` as 0.
+#### Upgrade
 
-All logic related to metric retrieval failure and `MetricRetrievalFailureCount` 
-evaluation must be gated by the same feature flag. This means that if the feature 
-flag is rolled back, any ongoing metrics retrieval failures will not affect scaling 
-behavior, and the resource will continue with the same scale as it did prior to 
-the feature being disabled.
+When the feature gate is enabled:
+- Existing HPAs continue to work unchanged
+- External metrics without `fallback` configuration behave as they do today (no scaling when unavailable)
+- Users can add `fallback` configuration to external metrics in their HPAs
+- The controller begins tracking per-metric `consecutiveFailureCount` for external metrics with fallback configured, starting from 0
+- The `fallbackActive` and `consecutiveFailureCount` status fields are populated for external metrics
+
+#### Downgrade
+
+When the feature gate is disabled:
+- The `fallback` field in `ExternalMetricSource` is ignored by the controller
+- The `fallbackActive` and `consecutiveFailureCount` status fields are not updated (remain at last values but are not used)
+- All external metrics revert to current behavior: HPA cannot scale based on them when they're unavailable
+- Any HPAs currently using fallback values will:
+  - Maintain their current replica count
+  - Stop using fallback values
+  - Resume normal metric-based scaling when external metrics become available again
+- No disruption to running workloads (pods are not restarted)
+
+All logic related to fallback evaluation, failure counting, and status updates is gated by the `HPAExternalMetricFallback` feature gate.
 
 <!--
 If applicable, how will the component be upgraded and downgraded? Make sure
@@ -574,7 +587,7 @@ This section must be completed when targeting alpha to a release.
 ###### How can this feature be enabled / disabled in a live cluster?
 
 - [x] Feature gate (also fill in values in `kep.yaml`)
-  - Feature gate name: HPAFallback
+  - Feature gate name: HPAExternalMetricFallback
   - Components depending on the feature gate: `kube-controller-manager`
 
 ###### Does enabling the feature change any default behavior?
