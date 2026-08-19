@@ -283,20 +283,19 @@ As an operator, I run a rate-limited service that scales based on an external re
 Introduce a new `FallbackStrategy` type, a new `ExternalMetricFallback` type, and add a new `fallback` field to the existing `ExternalMetricSource` struct. Additionally, add a new `FallbackStatusType` type, a new `ExternalMetricFallbackStatus` struct, and a new `fallback` field to the existing `ExternalMetricStatus` struct.
 
 ```golang
-// FallbackStrategy specifies how the fallback replica count interacts with the
-// current replica count when an external metric cannot be retrieved.
-type FallbackStrategy string
+// ExternalMetricFallbackStrategy specifies how the fallback replica count interacts with the current replica count when an external metric cannot be retrieved.
+type ExternalMetricFallbackStrategy string
 
 const (
-  // FallbackStrategyStatic always uses the configured fallback replicas value.
+  // ExternalMetricFallbackStrategyStatic always uses the configured fallback replicas value.
   // This is the default strategy.
-  FallbackStrategyStatic FallbackStrategy = "Static"
+  ExternalMetricFallbackStrategyStatic ExternalMetricFallbackStrategy = "Static"
 
-  // FallbackStrategyUseMax uses max(currentReplicas, fallback.replicas).
-  FallbackStrategyUseMax FallbackStrategy = "UseMax"
+  // ExternalMetricFallbackStrategyUseMax uses max(currentReplicas, fallback.replicas).
+  ExternalMetricFallbackStrategyUseMax ExternalMetricFallbackStrategy = "UseMax"
 
-  // FallbackStrategyUseMin uses min(currentReplicas, fallback.replicas).
-  FallbackStrategyUseMin FallbackStrategy = "UseMin"
+  // ExternalMetricFallbackStrategyUseMin uses min(currentReplicas, fallback.replicas).
+  ExternalMetricFallbackStrategyUseMin ExternalMetricFallbackStrategy = "UseMin"
 )
 
 // ExternalMetricFallback defines fallback behavior when an external metric cannot be retrieved
@@ -322,7 +321,7 @@ type ExternalMetricFallback struct {
   // - "UseMin": Use min(currentReplicas, fallback.replicas)
   // +optional
   // +default="Static"
-  Strategy *FallbackStrategy `json:"strategy,omitempty"`
+  Strategy *ExternalMetricFallbackStrategy `json:"strategy,omitempty"`
 }
 
 // ExternalMetricSource indicates how to scale on a metric not associated with
@@ -345,23 +344,23 @@ type ExternalMetricSource struct {
 Update `MetricStatus` to include per-metric fallback information:
 
 ```golang
-// FallbackStatusType indicates the current fallback state of an external metric.
-type FallbackStatusType string
+// ExternalMetricFallbackStatusType indicates the current fallback state of an external metric.
+type ExternalMetricFallbackStatusType string
 
 const (
-  // FallbackStatusNormal indicates the metric is being retrieved successfully.
-  FallbackStatusNormal FallbackStatusType = "Normal"
+  // ExternalMetricFallbackStatusNormal indicates the metric is being retrieved successfully.
+  ExternalMetricFallbackStatusNormal ExternalMetricFallbackStatusType = "Normal"
 
-  // FallbackStatusFallback indicates the metric is using a fallback value
+  // ExternalMetricFallbackStatusFallback indicates the metric is using a fallback value
   // due to retrieval failures exceeding the configured duration.
-  FallbackStatusFallback FallbackStatusType = "Fallback"
+  ExternalMetricFallbackStatusFallback ExternalMetricFallbackStatusType = "Fallback"
 )
 
 // ExternalMetricFallbackStatus describes the current fallback state for an external metric.
 type ExternalMetricFallbackStatus struct {
   // status indicates whether this metric is operating normally or in fallback mode.
   // +required
-  Status FallbackStatusType `json:"status"`
+  Status ExternalMetricFallbackStatusType `json:"status"`
 
   // firstFailureTime is the timestamp of the first consecutive failure retrieving this metric.
   // Reset to nil on successful retrieval. Used to calculate if failureDurationSeconds has been exceeded.
@@ -914,7 +913,7 @@ Describe them, providing:
   - Supported number of objects per namespace (for namespace-scoped objects)
 -->
 No. The feature only adds new fields and types to existing API types:
-- New `FallbackStrategy` string type with four constants
+- New `ExternalMetricFallbackStrategy` string type with three constants
 - New `ExternalMetricFallback` struct within `ExternalMetricSource`
 - New status fields in `ExternalMetricStatus`
 
