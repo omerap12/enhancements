@@ -267,7 +267,7 @@ As an operator, I run a rate-limited service that scales based on an external re
   - Mitigation: Documentation with best practices; validation ensures replicas > 0; HPA min/max constraints still apply; users should consider peak load scenarios when setting fallback values
 
 - Risk: Users configure failureDurationSeconds too short, causing premature fallback activation
-  - Mitigation: Minimum value of 180 seconds (3 minutes) provides reasonable buffer; validation enforces minimum values; documentation recommends considering normal metric provider latency and transient failures
+  - Mitigation: Minimum value of 30 seconds (2 HPA sync periods) prevents instant flip-flopping; validation enforces minimum values; documentation recommends considering normal metric provider latency and transient failures
 
 - Risk: Users configure failureDurationSeconds too long, delaying necessary scaling during outages
   - Mitigation: Documentation provides guidance on balancing between avoiding false positives and responding quickly to genuine outages; recommend 180-300 seconds (3-5 minutes) for most use cases
@@ -305,7 +305,7 @@ type ExternalMetricFallback struct {
   // first consecutive failure. Must be greater than 0.
   // +optional
   // default=180
-  // min=180
+  // min=30
   FailureDurationSeconds *int64 `json:"failureDurationSeconds,omitempty"`
 
   // replicas is the desired replica count to use when the external metric cannot be retrieved.
@@ -432,7 +432,7 @@ extending the production code to implement this enhancement.
 -->
 
 - Tests for Fallback Configuration:
-  - Verify failureDurationSeconds validation (must be >= 180)
+  - Verify failureDurationSeconds validation (must be >= 30)
   - Verify replicas validation (must be > 0)
   - Verify strategy validation (must be one of `Static`, `UseMax`, `UseMin`)
   - Verify strategy defaults to `Static` when not specified
